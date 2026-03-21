@@ -31,6 +31,7 @@ class UserCollection(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     character_id = Column(Integer, ForeignKey("characters.id", ondelete="CASCADE"), nullable=False)
     amount = Column(Integer, default=1)
+    is_favorite = Column(Integer, default=0)  # 0 or 1 for SQLite
     obtained_at = Column(DateTime, default=datetime.datetime.utcnow)
     
     user = relationship("User", back_populates="collection")

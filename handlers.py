@@ -7,6 +7,9 @@ from aiogram.types import (
     Message, ReplyKeyboardMarkup, KeyboardButton,
     URLInputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 )
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.sql.expression import func
@@ -15,6 +18,10 @@ from models import User, Character, UserCollection
 from parser import get_best_post_for_character
 
 router = Router()
+
+class ConversionState(StatesGroup):
+    choosing_rarity = State()
+    selecting_characters = State()
 
 # Per-user cooldown tracking (in-memory, resets on restart)
 ROLL_COOLDOWN_SECONDS = 10
@@ -25,12 +32,13 @@ _last_roll: dict[int, datetime] = {}
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🎲 Крутить"), KeyboardButton(text="🗂 Моя коллекция")]
+            [KeyboardButton(text="🎲 Крутить"), KeyboardButton(text="🗂 Моя коллекция")],
+            [KeyboardButton(text="♻️ Конвертация")]
         ],
         resize_keyboard=True
     )
 
-def get_collection_keyboard(collections, page: int = 0, page_size: int = 8):
+def get_collection_keyboard(collections, page: int = 0, page_size: int = 8, only_favorites: bool = False):
     """Build inline keyboard for collection browsing."""
     start = page * page_size
     end = start + page_size
@@ -39,8 +47,9 @@ def get_collection_keyboard(collections, page: int = 0, page_size: int = 8):
     
     buttons = []
     for c in page_items:
-        rank = calculate_rank(c.character.post_count)
-        label = f"[{rank}] {c.character.tag_name}"
+        rank = calculate_rank_short(c.character.post_count)
+        fav_icon = "❤️ " if c.is_favorite else ""
+        label = f"{fav_icon}[{rank}] {c.character.tag_name}"
         buttons.append([InlineKeyboardButton(
             text=label[:40],
             callback_data=f"char:{c.character.id}"
@@ -49,15 +58,29 @@ def get_collection_keyboard(collections, page: int = 0, page_size: int = 8):
     # Pagination row
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"coll_page:{page-1}"))
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"coll_page:{page-1}:{int(only_favorites)}"))
     if page < total_pages - 1:
-        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"coll_page:{page+1}"))
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"coll_page:{page+1}:{int(only_favorites)}"))
     if nav:
         buttons.append(nav)
     
-    buttons.append([InlineKeyboardButton(text="🔍 Поиск по имени", callback_data="coll_search")])
+    # Bottom row: Search and Favorites Toggle
+    bottom_row = [InlineKeyboardButton(text="🔍 Поиск", callback_data="coll_search")]
+    if only_favorites:
+        bottom_row.append(InlineKeyboardButton(text="📜 Вся коллекция", callback_data="coll_page:0:0"))
+    else:
+        bottom_row.append(InlineKeyboardButton(text="❤️ Избранное", callback_data="coll_page:0:1"))
+    
+    buttons.append(bottom_row)
     
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+def get_char_view_keyboard(character_id: int, is_favorite: bool):
+    """Buttons for character card view."""
+    fav_text = "💔 Убрать из избранного" if is_favorite else "❤️ В избранное"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=fav_text, callback_data=f"fav_toggle:{character_id}")]
+    ])
 
 # ─── Helpers ──────────────────────────────────────────────────
 
@@ -93,12 +116,15 @@ async def get_user(session: AsyncSession, telegram_id: int):
     res = await session.execute(stmt)
     return res.scalars().first()
 
-async def get_user_collections(session: AsyncSession, user_id: int):
+async def get_user_collections(session: AsyncSession, user_id: int, only_favorites: bool = False):
     stmt = (
         select(UserCollection)
         .where(UserCollection.user_id == user_id)
         .options(selectinload(UserCollection.character))
     )
+    if only_favorites:
+        stmt = stmt.where(UserCollection.is_favorite == 1)
+        
     res = await session.execute(stmt)
     collections = res.scalars().all()
     collections.sort(key=lambda c: c.character.post_count, reverse=True)
@@ -139,13 +165,8 @@ async def cmd_roll(message: Message, session: AsyncSession):
     _last_roll[message.from_user.id] = now
 
     drop_rates = {
-        "SSS": 0.005,
-        "SS": 0.015,
-        "S": 0.05,
-        "A": 0.08,
-        "B": 0.25,
-        "C": 0.25,
-        "D": 0.35
+        "SSS": 0.005, "SS": 0.015, "S": 0.05,
+        "A": 0.08, "B": 0.25, "C": 0.25, "D": 0.35
     }
     tiers = list(drop_rates.keys())
     weights = list(drop_rates.values())
@@ -188,8 +209,8 @@ async def cmd_roll(message: Message, session: AsyncSession):
         if collection:
             collection.amount += 1
         else:
-            new_coll = UserCollection(user_id=user.id, character_id=character.id, amount=1)
-            session.add(new_coll)
+            collection = UserCollection(user_id=user.id, character_id=character.id, amount=1)
+            session.add(collection)
             
         await session.commit()
         
@@ -201,13 +222,16 @@ async def cmd_roll(message: Message, session: AsyncSession):
         )
             
         await status_msg.delete()
+        
+        markup = get_char_view_keyboard(character.id, collection.is_favorite)
+        
         if image_url:
             try:
-                await message.answer_photo(photo=URLInputFile(image_url), caption=caption, parse_mode="HTML")
+                await message.answer_photo(photo=URLInputFile(image_url), caption=caption, parse_mode="HTML", reply_markup=markup)
             except Exception:
-                await message.answer(f"{caption}\n\n<a href='{image_url}'>Медиафайл</a>", parse_mode="HTML")
+                await message.answer(f"{caption}\n\n<a href='{image_url}'>Медиафайл</a>", parse_mode="HTML", reply_markup=markup)
         else:
-            await message.answer(f"{caption}\n\n[Изображение не найдено]", parse_mode="HTML")
+            await message.answer(f"{caption}\n\n[Изображение не найдено]", parse_mode="HTML", reply_markup=markup)
             
     except Exception as e:
         logging.error(f"Error in roll logic: {e}")
@@ -231,7 +255,7 @@ async def cmd_collection(message: Message, session: AsyncSession):
     
     total = len(collections)
     await message.answer(
-        f"🗂 <b>Ваша коллекция</b> — {total} персонажей\n\nВыберите персонажа, чтобы посмотреть карточку:",
+        f"🗂 <b>Ваша коллекция</b> — {total} персонажей",
         reply_markup=get_collection_keyboard(collections, page=0)
     )
 
@@ -239,32 +263,53 @@ async def cmd_collection(message: Message, session: AsyncSession):
 
 @router.callback_query(F.data.startswith("coll_page:"))
 async def cb_collection_page(callback: CallbackQuery, session: AsyncSession):
-    page = int(callback.data.split(":")[1])
+    data = callback.data.split(":")
+    page = int(data[1])
+    only_favorites = bool(int(data[2])) if len(data) > 2 else False
+    
     user = await get_user(session, callback.from_user.id)
     if not user:
         await callback.answer("Пожалуйста, нажмите /start.")
         return
     
-    collections = await get_user_collections(session, user.id)
-    total = len(collections)
+    collections = await get_user_collections(session, user.id, only_favorites=only_favorites)
     
-    await callback.message.edit_reply_markup(
-        reply_markup=get_collection_keyboard(collections, page=page)
-    )
+    if only_favorites and not collections:
+        await callback.answer("У вас пока нет избранных персонажей.", show_alert=True)
+        return
+
+    text = f"🗂 <b>{'Избранное' if only_favorites else 'Ваша коллекция'}</b> — {len(collections)} персонажей"
+    
+    try:
+        await callback.message.edit_text(
+            text=text,
+            reply_markup=get_collection_keyboard(collections, page=page, only_favorites=only_favorites)
+        )
+    except Exception:
+        # Avoid error if text remains the same
+        await callback.message.edit_reply_markup(
+            reply_markup=get_collection_keyboard(collections, page=page, only_favorites=only_favorites)
+        )
     await callback.answer()
 
 @router.callback_query(F.data.startswith("char:"))
 async def cb_view_character(callback: CallbackQuery, session: AsyncSession):
     char_id = int(callback.data.split(":")[1])
+    user = await get_user(session, callback.from_user.id)
     
-    stmt = select(Character).where(Character.id == char_id)
+    stmt = (
+        select(UserCollection)
+        .where(UserCollection.user_id == user.id, UserCollection.character_id == char_id)
+        .options(selectinload(UserCollection.character))
+    )
     res = await session.execute(stmt)
-    character = res.scalars().first()
+    coll = res.scalars().first()
     
-    if not character:
-        await callback.answer("Персонаж не найден.", show_alert=True)
+    if not coll:
+        await callback.answer("Персонаж не найден в вашей коллекции.", show_alert=True)
         return
     
+    character = coll.character
     await callback.answer("⏳ Загружаем арт...")
     
     image_url = character.best_image_url
@@ -281,20 +326,54 @@ async def cb_view_character(callback: CallbackQuery, session: AsyncSession):
         f"💪 Ранг: {rank}"
     )
     
+    markup = get_char_view_keyboard(character.id, coll.is_favorite)
+    
     if image_url:
         try:
             await callback.message.answer_photo(
                 photo=URLInputFile(image_url),
                 caption=caption,
-                parse_mode="HTML"
+                parse_mode="HTML",
+                reply_markup=markup
             )
         except Exception:
             await callback.message.answer(
                 f"{caption}\n\n<a href='{image_url}'>Открыть арт</a>",
-                parse_mode="HTML"
+                parse_mode="HTML",
+                reply_markup=markup
             )
     else:
-        await callback.message.answer(f"{caption}\n\n[Изображение не найдено]", parse_mode="HTML")
+        await callback.message.answer(f"{caption}\n\n[Изображение не найдено]", parse_mode="HTML", reply_markup=markup)
+
+@router.callback_query(F.data.startswith("fav_toggle:"))
+async def cb_fav_toggle(callback: CallbackQuery, session: AsyncSession):
+    char_id = int(callback.data.split(":")[1])
+    user = await get_user(session, callback.from_user.id)
+    
+    stmt = select(UserCollection).where(
+        UserCollection.user_id == user.id,
+        UserCollection.character_id == char_id
+    )
+    res = await session.execute(stmt)
+    coll = res.scalars().first()
+    
+    if not coll:
+        await callback.answer("Персонаж не найден.", show_alert=True)
+        return
+    
+    coll.is_favorite = 1 if not coll.is_favorite else 0
+    await session.commit()
+    
+    # Update current message keyboard
+    try:
+        await callback.message.edit_reply_markup(
+            reply_markup=get_char_view_keyboard(char_id, coll.is_favorite)
+        )
+    except:
+        pass
+        
+    status = "добавлен в избранное ❤️" if coll.is_favorite else "удалён из избранного 💔"
+    await callback.answer(f"Персонаж {status}")
 
 @router.callback_query(F.data == "coll_search")
 async def cb_search_prompt(callback: CallbackQuery, session: AsyncSession):
@@ -304,34 +383,190 @@ async def cb_search_prompt(callback: CallbackQuery, session: AsyncSession):
     )
     await callback.answer()
 
-@router.message(F.text & ~F.text.startswith("/") & ~F.text.in_({"🎲 Крутить", "🗂 Моя коллекция"}))
-async def cmd_search_collection(message: Message, session: AsyncSession):
-    """Search collection by character name substring."""
-    user = await get_user(session, message.from_user.id)
-    if not user:
-        return
+# ─── Conversion / Crafting ───────────────────────────────────
+
+@router.message(F.text == "♻️ Конвертация")
+async def cmd_conversion(message: Message, state: FSMContext):
+    await state.clear()
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="D ➔ C (+⭐)", callback_data="conv_start:D:C")],
+        [InlineKeyboardButton(text="C ➔ B (+⭐⭐)", callback_data="conv_start:C:B")],
+        [InlineKeyboardButton(text="B ➔ A (+⭐⭐⭐)", callback_data="conv_start:B:A")],
+        [InlineKeyboardButton(text="A ➔ S (+💎)", callback_data="conv_start:A:S")],
+        [InlineKeyboardButton(text="S ➔ SS (+💎💎)", callback_data="conv_start:S:SS")],
+        [InlineKeyboardButton(text="SS ➔ SSS (+💎💎💎)", callback_data="conv_start:SS:SSS")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="conv_cancel")]
+    ])
+    await message.answer(
+        "♻️ <b>Конвертация персонажей</b>\n\n"
+        "Вы можете объединить <b>10 персонажей</b> одной редкости, "
+        "чтобы получить одного случайного персонажа редкости выше.\n\n"
+        "Выберите путь конвертации:",
+        reply_markup=markup
+    )
+
+@router.callback_query(F.data == "conv_cancel")
+async def cb_conv_cancel(callback: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text("Конвертация отменена.")
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("conv_start:"))
+async def cb_conv_rarity_selected(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    _, from_rank, to_rank = callback.data.split(":")
+    user = await get_user(session, callback.from_user.id)
     
-    query = message.text.strip().lower().replace(" ", "_")
-    
+    # Get all characters of this rank that user has
     stmt = (
         select(UserCollection)
         .join(UserCollection.character)
-        .where(
-            UserCollection.user_id == user.id,
-            Character.tag_name.ilike(f"%{query}%")
-        )
+        .where(UserCollection.user_id == user.id)
+        .where(get_rank_condition(from_rank))
         .options(selectinload(UserCollection.character))
     )
     res = await session.execute(stmt)
-    results = res.scalars().all()
+    collections = res.scalars().all()
     
-    if not results:
-        await message.answer(f"Персонажи с именем <b>{message.text}</b> не найдены в вашей коллекции.")
+    if sum(c.amount for c in collections) < 10:
+        await callback.answer(f"У вас недостаточно персонажей ранга {from_rank} (нужно 10).", show_alert=True)
         return
+        
+    await state.update_data(from_rank=from_rank, to_rank=to_rank, selected_ids={}, total_selected=0)
+    await state.set_state(ConversionState.selecting_characters)
     
-    results.sort(key=lambda c: c.character.post_count, reverse=True)
+    await update_conversion_picker(callback.message, state, collections)
+    await callback.answer()
+
+async def update_conversion_picker(message: Message, state: FSMContext, collections):
+    data = await state.get_data()
+    selected = data.get("selected_ids", {})
+    total = data.get("total_selected", 0)
+    from_rank = data.get("from_rank")
+    to_rank = data.get("to_rank")
     
-    await message.answer(
-        f"🔍 Результаты поиска по <b>\"{message.text}\"</b>:\n\nВыберите персонажа:",
-        reply_markup=get_collection_keyboard(results, page=0)
+    buttons = []
+    # Simplified list for picker (no pagination for now to keep logic clean)
+    for c in collections:
+        count_in_pool = selected.get(str(c.id), 0)
+        label = f"[{count_in_pool}/{c.amount}] {c.character.tag_name}"
+        buttons.append([InlineKeyboardButton(text=label, callback_data=f"conv_toggle:{c.id}")])
+    
+    control_row = []
+    if total == 10:
+        control_row.append(InlineKeyboardButton(text="✅ ПОДТВЕРДИТЬ", callback_data="conv_confirm"))
+    control_row.append(InlineKeyboardButton(text="❌ Отмена", callback_data="conv_cancel"))
+    buttons.append(control_row)
+    
+    text = (
+        f"♻️ <b>Подготовка к конвертации: {from_rank} ➔ {to_rank}</b>\n\n"
+        f"Выбрано: <b>{total}/10</b> персонажей.\n"
+        f"Нажимайте на персонажей ниже, чтобы добавить их в пул."
     )
+    
+    try:
+        await message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    except:
+        await message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@router.callback_query(F.data.startswith("conv_toggle:"), ConversionState.selecting_characters)
+async def cb_conv_toggle_char(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    coll_id = int(callback.data.split(":")[1])
+    data = await state.get_data()
+    selected = data["selected_ids"]
+    total = data["total_selected"]
+    
+    # Check current amount in DB to be safe
+    stmt = select(UserCollection).where(UserCollection.id == coll_id)
+    res = await session.execute(stmt)
+    coll = res.scalars().first()
+    
+    current_count = selected.get(str(coll_id), 0)
+    
+    if current_count < coll.amount:
+        if total < 10:
+            selected[str(coll_id)] = current_count + 1
+            total += 1
+        else:
+            await callback.answer("Максимум 10 персонажей!", show_alert=True)
+            return
+    else:
+        # Reset if clicked again at max? No, let's just allow decrementing
+        if current_count > 0:
+            selected[str(coll_id)] = current_count - 1
+            total -= 1
+            
+    await state.update_data(selected_ids=selected, total_selected=total)
+    
+    # Re-fetch collections to update UI
+    user = await get_user(session, callback.from_user.id)
+    stmt = (
+        select(UserCollection)
+        .join(UserCollection.character)
+        .where(UserCollection.user_id == user.id)
+        .where(get_rank_condition(data["from_rank"]))
+        .options(selectinload(UserCollection.character))
+    )
+    res = await session.execute(stmt)
+    collections = res.scalars().all()
+    
+    await update_conversion_picker(callback.message, state, collections)
+    await callback.answer()
+
+@router.callback_query(F.data == "conv_confirm", ConversionState.selecting_characters)
+async def cb_conv_confirm(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+    if data["total_selected"] != 10:
+        await callback.answer("Нужно выбрать ровно 10!")
+        return
+        
+    to_rank = data["to_rank"]
+    selected = data["selected_ids"]
+    
+    # 1. Sacrifice characters
+    for coll_id_str, count in selected.items():
+        if count <= 0: continue
+        coll_id = int(coll_id_str)
+        stmt = select(UserCollection).where(UserCollection.id == coll_id)
+        res = await session.execute(stmt)
+        coll = res.scalars().first()
+        
+        if coll.amount > count:
+            coll.amount -= count
+        else:
+            await session.delete(coll)
+            
+    # 2. Add reward
+    stmt_random = select(Character).where(get_rank_condition(to_rank)).order_by(func.random()).limit(1)
+    res_reward = await session.execute(stmt_random)
+    reward_char = res_reward.scalars().first()
+    
+    if not reward_char:
+        # Fallback if no characters of that rank exist in DB
+        await callback.message.answer("Критическая ошибка: персонажи целевого ранга не найдены.")
+        await state.clear()
+        return
+
+    user = await get_user(session, callback.from_user.id)
+    stmt_check = select(UserCollection).where(
+        UserCollection.user_id == user.id,
+        UserCollection.character_id == reward_char.id
+    )
+    res_check = await session.execute(stmt_check)
+    existing = res_check.scalars().first()
+    
+    if existing:
+        existing.amount += 1
+    else:
+        new_coll = UserCollection(user_id=user.id, character_id=reward_char.id, amount=1)
+        session.add(new_coll)
+        
+    await session.commit()
+    await state.clear()
+    
+    rank_visual = calculate_rank(reward_char.post_count)
+    await callback.message.answer(
+        f"🔥 <b>Конвертация успешна!</b>\n\n"
+        f"Вы пожертвовали 10 персонажами и получили нового:\n"
+        f"✨ <b>{reward_char.tag_name}</b> ({rank_visual})"
+    )
+    await callback.answer("Успех!")
