@@ -389,12 +389,12 @@ async def cb_search_prompt(callback: CallbackQuery, session: AsyncSession):
 async def cmd_conversion(message: Message, state: FSMContext):
     await state.clear()
     markup = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="D ➔ C (+⭐)", callback_data="conv_start:D:C")],
-        [InlineKeyboardButton(text="C ➔ B (+⭐⭐)", callback_data="conv_start:C:B")],
-        [InlineKeyboardButton(text="B ➔ A (+⭐⭐⭐)", callback_data="conv_start:B:A")],
-        [InlineKeyboardButton(text="A ➔ S (+💎)", callback_data="conv_start:A:S")],
-        [InlineKeyboardButton(text="S ➔ SS (+💎💎)", callback_data="conv_start:S:SS")],
-        [InlineKeyboardButton(text="SS ➔ SSS (+💎💎💎)", callback_data="conv_start:SS:SSS")],
+        [InlineKeyboardButton(text="D ➔ C", callback_data="conv_start:D:C")],
+        [InlineKeyboardButton(text="C ➔ B", callback_data="conv_start:C:B")],
+        [InlineKeyboardButton(text="B ➔ A", callback_data="conv_start:B:A")],
+        [InlineKeyboardButton(text="A ➔ S", callback_data="conv_start:A:S")],
+        [InlineKeyboardButton(text="S ➔ SS", callback_data="conv_start:S:SS")],
+        [InlineKeyboardButton(text="SS ➔ SSS", callback_data="conv_start:SS:SSS")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="conv_cancel")]
     ])
     await message.answer(
@@ -560,13 +560,50 @@ async def cb_conv_confirm(callback: CallbackQuery, state: FSMContext, session: A
         new_coll = UserCollection(user_id=user.id, character_id=reward_char.id, amount=1)
         session.add(new_coll)
         
+    # 3. Handle image and notification
+    status_msg = await callback.message.answer("⏳ Получаем новый арт...")
+    try:
+        image_url = reward_char.best_image_url
+        if not image_url:
+            image_url = await get_best_post_for_character(reward_char.tag_name)
+            if image_url:
+                reward_char.best_image_url = image_url
+                await session.commit()
+        
+        await status_msg.delete()
+        
+        rank_visual = calculate_rank(reward_char.post_count)
+        caption = (
+            f"🔥 <b>Конвертация успешна!</b>\n\n"
+            f"Вы пожертвовали 10 персонажами и получили нового:\n"
+            f"✨ <b>{reward_char.tag_name}</b> ({rank_visual})"
+        )
+        
+        # New collection entry 'is_favorite' is always 0 since it's a new reward
+        # (or 0 if it was merged into existing)
+        markup = get_char_view_keyboard(reward_char.id, False)
+
+        if image_url:
+            try:
+                await callback.message.answer_photo(
+                    photo=URLInputFile(image_url),
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=markup
+                )
+            except Exception:
+                await callback.message.answer(
+                    f"{caption}\n\n<a href='{image_url}'>Открыть арт</a>",
+                    parse_mode="HTML",
+                    reply_markup=markup
+                )
+        else:
+            await callback.message.answer(f"{caption}\n\n[Изображение не найдено]", parse_mode="HTML", reply_markup=markup)
+            
+    except Exception as e:
+        logging.error(f"Error in conversion final view: {e}")
+        await callback.message.answer(f"🔥 Конвертация успешна! Вы получили: {reward_char.tag_name}")
+    
     await session.commit()
     await state.clear()
-    
-    rank_visual = calculate_rank(reward_char.post_count)
-    await callback.message.answer(
-        f"🔥 <b>Конвертация успешна!</b>\n\n"
-        f"Вы пожертвовали 10 персонажами и получили нового:\n"
-        f"✨ <b>{reward_char.tag_name}</b> ({rank_visual})"
-    )
     await callback.answer("Успех!")
