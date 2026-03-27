@@ -146,6 +146,41 @@ async def get_best_post_for_character(character_name: str):
     
     return None
 
+async def get_posts_for_character(character_name: str, limit: int = 10, page: int = 1):
+    """
+    Fetch a list of top scored images for a character.
+    Used for the gallery/show more feature.
+    """
+    params = {
+        "tags": f"{character_name} order:score",
+        "limit": limit,
+        "page": page
+    }
+    
+    try:
+        session = await get_session()
+        async with session.get("/posts.json", params=params, auth=get_auth()) as response:
+            if response.status == 200:
+                posts = await response.json()
+                if not isinstance(posts, list):
+                    return []
+                
+                IMAGE_EXTS = ("jpg", "jpeg", "png", "webp")
+                
+                # Filter to only valid images with URLs
+                valid_urls = []
+                for post in posts:
+                    if post.get("file_ext", "").lower() in IMAGE_EXTS:
+                        url = post.get("large_file_url") or post.get("file_url")
+                        if url:
+                            valid_urls.append(url)
+                            
+                return valid_urls
+    except Exception as e:
+        logging.error(f"Error fetching multiple posts for '{character_name}': {e}")
+        
+    return []
+
 async def test_parser():
     async with async_session() as session:
         await sync_characters(session)
