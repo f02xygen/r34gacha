@@ -254,8 +254,12 @@ async def cmd_collection(message: Message, session: AsyncSession):
         return
     
     total = len(collections)
+    page_size = 8
+    total_pages = (total + page_size - 1) // page_size
+    
     await message.answer(
-        f"🗂 <b>Ваша коллекция</b> — {total} персонажей",
+        f"🗂 <b>Ваша коллекция</b> — {total} персонажей\n"
+        f"Страница: <b>1/{total_pages}</b>",
         reply_markup=get_collection_keyboard(collections, page=0)
     )
 
@@ -278,7 +282,12 @@ async def cb_collection_page(callback: CallbackQuery, session: AsyncSession):
         await callback.answer("У вас пока нет избранных персонажей.", show_alert=True)
         return
 
-    text = f"🗂 <b>{'Избранное' if only_favorites else 'Ваша коллекция'}</b> — {len(collections)} персонажей"
+    total = len(collections)
+    page_size = 8
+    total_pages = (total + page_size - 1) // page_size
+    
+    label = 'Избранное' if only_favorites else 'Ваша коллекция'
+    text = f"🗂 <b>{label}</b> — {total} персонажей\nСтраница: <b>{page+1}/{total_pages}</b>"
     
     try:
         await callback.message.edit_text(
@@ -431,7 +440,7 @@ async def cb_conv_rarity_selected(callback: CallbackQuery, state: FSMContext, se
         await callback.answer(f"У вас недостаточно персонажей ранга {from_rank} (нужно 10).", show_alert=True)
         return
         
-    await state.update_data(from_rank=from_rank, to_rank=to_rank, selected_ids={}, total_selected=0)
+    await state.update_data(from_rank=from_rank, to_rank=to_rank, selected_ids={}, total_selected=0, page=0)
     await state.set_state(ConversionState.selecting_characters)
     
     await update_conversion_picker(callback.message, state, collections)
@@ -443,13 +452,29 @@ async def update_conversion_picker(message: Message, state: FSMContext, collecti
     total = data.get("total_selected", 0)
     from_rank = data.get("from_rank")
     to_rank = data.get("to_rank")
+    page = data.get("page", 0)
+    page_size = 8
+    
+    start = page * page_size
+    end = start + page_size
+    page_items = collections[start:end]
+    total_pages = (len(collections) + page_size - 1) // page_size
     
     buttons = []
-    # Simplified list for picker (no pagination for now to keep logic clean)
-    for c in collections:
+    for c in page_items:
         count_in_pool = selected.get(str(c.id), 0)
-        label = f"[{count_in_pool}/{c.amount}] {c.character.tag_name}"
+        fav_icon = "❤️ " if c.is_favorite else ""
+        label = f"{fav_icon}[{count_in_pool}/{c.amount}] {c.character.tag_name}"
         buttons.append([InlineKeyboardButton(text=label, callback_data=f"conv_toggle:{c.id}")])
+    
+    # Pagination row
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"conv_page:{page-1}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"conv_page:{page+1}"))
+    if nav:
+        buttons.append(nav)
     
     control_row = []
     if total == 10:
@@ -460,6 +485,7 @@ async def update_conversion_picker(message: Message, state: FSMContext, collecti
     text = (
         f"♻️ <b>Подготовка к конвертации: {from_rank} ➔ {to_rank}</b>\n\n"
         f"Выбрано: <b>{total}/10</b> персонажей.\n"
+        f"Страница: <b>{page+1}/{total_pages}</b>\n"
         f"Нажимайте на персонажей ниже, чтобы добавить их в пул."
     )
     
@@ -467,6 +493,26 @@ async def update_conversion_picker(message: Message, state: FSMContext, collecti
         await message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     except:
         await message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+@router.callback_query(F.data.startswith("conv_page:"), ConversionState.selecting_characters)
+async def cb_conv_page(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    page = int(callback.data.split(":")[1])
+    await state.update_data(page=page)
+    data = await state.get_data()
+    
+    user = await get_user(session, callback.from_user.id)
+    stmt = (
+        select(UserCollection)
+        .join(UserCollection.character)
+        .where(UserCollection.user_id == user.id)
+        .where(get_rank_condition(data["from_rank"]))
+        .options(selectinload(UserCollection.character))
+    )
+    res = await session.execute(stmt)
+    collections = res.scalars().all()
+    
+    await update_conversion_picker(callback.message, state, collections)
+    await callback.answer()
 
 @router.callback_query(F.data.startswith("conv_toggle:"), ConversionState.selecting_characters)
 async def cb_conv_toggle_char(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
@@ -607,3 +653,36 @@ async def cb_conv_confirm(callback: CallbackQuery, state: FSMContext, session: A
     await session.commit()
     await state.clear()
     await callback.answer("Успех!")
+
+
+@router.message(F.text & ~F.text.startswith("/") & ~F.text.in_({"🎲 Крутить", "🗂 Моя коллекция", "♻️ Конвертация"}))
+async def cmd_search_collection(message: Message, session: AsyncSession):
+    """Search collection by character name substring."""
+    user = await get_user(session, message.from_user.id)
+    if not user:
+        return
+    
+    query = message.text.strip().lower().replace(" ", "_")
+    
+    stmt = (
+        select(UserCollection)
+        .join(UserCollection.character)
+        .where(
+            UserCollection.user_id == user.id,
+            Character.tag_name.ilike(f"%{query}%")
+        )
+        .options(selectinload(UserCollection.character))
+    )
+    res = await session.execute(stmt)
+    results = res.scalars().all()
+    
+    if not results:
+        await message.answer(f"Персонажи с именем <b>{message.text}</b> не найдены в вашей коллекции.")
+        return
+    
+    results.sort(key=lambda c: c.character.post_count, reverse=True)
+    
+    await message.answer(
+        f"🔍 Результаты поиска по <b>\"{message.text}\"</b>:",
+        reply_markup=get_collection_keyboard(results, page=0)
+    )
