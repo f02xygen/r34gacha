@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime
 from aiogram import Router, F
-from aiogram.types import Message, CallbackQuery, URLInputFile, InputMediaPhoto, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, URLInputFile, InputMediaPhoto, InputMediaVideo, InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
@@ -178,13 +178,18 @@ async def cb_more_arts(callback: CallbackQuery, session: AsyncSession):
         
     await callback.answer("⏳ Загружаем арты...")
     
-    urls = await get_posts_for_character(character.tag_name, limit=10, page=page)
+    items = await get_posts_for_character(character.tag_name, limit=10, page=page)
     
-    if not urls:
+    if not items:
         await callback.message.answer("Больше артов не найдено.")
         return
         
-    media_group = [InputMediaPhoto(media=url) for url in urls]
+    media_group = []
+    for item in items:
+        if item["type"] == "photo":
+            media_group.append(InputMediaPhoto(media=item["url"]))
+        else:
+            media_group.append(InputMediaVideo(media=item["url"]))
     
     try:
         await callback.message.answer_media_group(media=media_group)

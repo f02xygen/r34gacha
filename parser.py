@@ -133,27 +133,32 @@ async def get_best_post_for_character(character_name: str):
         return None
     
     IMAGE_EXTS = ("jpg", "jpeg", "png", "webp")
+    MAX_PHOTO_SIZE = 5_000_000 # 5 MB via URL
     
     # Pass 1: single character + image
     for post in posts:
-        if post.get("tag_count_character") == 1 and post.get("file_ext", "").lower() in IMAGE_EXTS:
+        is_small = post.get("file_size", 0) <= MAX_PHOTO_SIZE
+        if post.get("tag_count_character") == 1 and post.get("file_ext", "").lower() in IMAGE_EXTS and is_small:
             return post.get("large_file_url") or post.get("file_url")
     
     # Pass 2: any image (character may have group arts only)
     for post in posts:
-        if post.get("file_ext", "").lower() in IMAGE_EXTS:
+        is_small = post.get("file_size", 0) <= MAX_PHOTO_SIZE
+        if post.get("file_ext", "").lower() in IMAGE_EXTS and is_small:
             return post.get("large_file_url") or post.get("file_url")
     
     return None
 
 async def get_posts_for_character(character_name: str, limit: int = 10, page: int = 1):
     """
-    Fetch a list of top scored images for a character.
+    Fetch a list of top scored images (and videos/gifs) for a character.
     Used for the gallery/show more feature.
     """
+    # Fetch more than needed to ensure we hit the requested 'limit' (10) after filtering
+    # We fetch 4x because many characters have WebM/GIFs that we must skip for media groups
     params = {
         "tags": f"{character_name} order:score",
-        "limit": limit,
+        "limit": limit * 4,
         "page": page
     }
     
@@ -166,16 +171,26 @@ async def get_posts_for_character(character_name: str, limit: int = 10, page: in
                     return []
                 
                 IMAGE_EXTS = ("jpg", "jpeg", "png", "webp")
+                VIDEO_EXTS = ("mp4",)
+                MAX_PHOTO_SIZE = 5_000_000  # 5 MB via URL
+                MAX_VIDEO_SIZE = 20_000_000 # 20 MB via URL
                 
-                # Filter to only valid images with URLs
-                valid_urls = []
+                valid_items = []
                 for post in posts:
-                    if post.get("file_ext", "").lower() in IMAGE_EXTS:
-                        url = post.get("large_file_url") or post.get("file_url")
-                        if url:
-                            valid_urls.append(url)
+                    ext = post.get("file_ext", "").lower()
+                    url = post.get("large_file_url") or post.get("file_url")
+                    size = post.get("file_size", 0)
+                    if not url: continue
+                    
+                    if ext in IMAGE_EXTS and size <= MAX_PHOTO_SIZE:
+                        valid_items.append({"url": url, "type": "photo"})
+                    elif ext in VIDEO_EXTS and size <= MAX_VIDEO_SIZE:
+                        valid_items.append({"url": url, "type": "video"})
+                    
+                    if len(valid_items) >= limit:
+                        break
                             
-                return valid_urls
+                return valid_items
     except Exception as e:
         logging.error(f"Error fetching multiple posts for '{character_name}': {e}")
         
