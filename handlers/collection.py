@@ -5,7 +5,7 @@ from aiogram.types import Message, CallbackQuery, URLInputFile, InputMediaPhoto,
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
-from models import Character, UserCollection
+from models import Character, UserCollection, User
 from parser import get_best_post_for_character, get_posts_for_character
 from .utils import get_user, get_user_collections, calculate_rank, ACTION_COOLDOWN_SECONDS, _last_action
 from .keyboards import get_collection_keyboard, get_char_view_keyboard
@@ -32,41 +32,67 @@ async def cmd_collection(message: Message, session: AsyncSession):
     await message.answer(
         f"🗂 <b>Ваша коллекция</b> — {total} персонажей\n"
         f"Страница: <b>1/{total_pages}</b>",
-        reply_markup=get_collection_keyboard(collections, page=0)
+        reply_markup=get_collection_keyboard(collections, target_user_id=user.id, page=0, is_owner=True)
     )
 
 @router.callback_query(F.data.startswith("coll_page:"))
 async def cb_collection_page(callback: CallbackQuery, session: AsyncSession):
     data = callback.data.split(":")
-    page = int(data[1])
-    only_favorites = bool(int(data[2])) if len(data) > 2 else False
+    if len(data) == 3:
+        # Backward compatibility for old buttons: coll_page:{page}:{only_favorites}
+        target_user_id = 0 # Will be populated differently below
+        page = int(data[1])
+        only_favorites = bool(int(data[2]))
+    else:
+        # New format: coll_page:{target_user_id}:{page}:{only_favorites}
+        target_user_id = int(data[1])
+        page = int(data[2])
+        only_favorites = bool(int(data[3])) if len(data) > 3 else False
     
-    user = await get_user(session, callback.from_user.id)
-    if not user:
+    user_req = await get_user(session, callback.from_user.id)
+    if not user_req:
         await callback.answer("Пожалуйста, нажмите /start.")
         return
+        
+    if target_user_id == 0:
+        target_user_id = user_req.id
+        
+    # Check if we are viewing someone else's collection
+    is_owner = target_user_id == user_req.id
+    target_user_stmt = select(User).where(User.id == target_user_id)
+    res_tu = await session.execute(target_user_stmt)
+    target_user = res_tu.scalars().first()
+    if not target_user:
+        await callback.answer("Пользователь не найден.", show_alert=True)
+        return
     
-    collections = await get_user_collections(session, user.id, only_favorites=only_favorites)
+    collections = await get_user_collections(session, target_user.id, only_favorites=only_favorites)
     
     if only_favorites and not collections:
-        await callback.answer("У вас пока нет избранных персонажей.", show_alert=True)
+        await callback.answer("У этого пользователя пока нет избранных персонажей." if not is_owner else "У вас пока нет избранных персонажей.", show_alert=True)
         return
 
     total = len(collections)
     page_size = 8
-    total_pages = (total + page_size - 1) // page_size
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    if page >= total_pages: page = total_pages - 1
     
-    label = 'Избранное' if only_favorites else 'Ваша коллекция'
+    if is_owner:
+        label = 'Избранное' if only_favorites else 'Ваша коллекция'
+    else:
+        name_display = f"@{target_user.username}" if target_user.username else f"ID {target_user.telegram_id}"
+        label = f'Избранное {name_display}' if only_favorites else f'Коллекция {name_display}'
+        
     text = f"🗂 <b>{label}</b> — {total} персонажей\nСтраница: <b>{page+1}/{total_pages}</b>"
     
     try:
         await callback.message.edit_text(
             text=text,
-            reply_markup=get_collection_keyboard(collections, page=page, only_favorites=only_favorites)
+            reply_markup=get_collection_keyboard(collections, target_user_id=target_user_id, page=page, only_favorites=only_favorites, is_owner=is_owner)
         )
     except Exception:
         await callback.message.edit_reply_markup(
-            reply_markup=get_collection_keyboard(collections, page=page, only_favorites=only_favorites)
+            reply_markup=get_collection_keyboard(collections, target_user_id=target_user_id, page=page, only_favorites=only_favorites, is_owner=is_owner)
         )
     await callback.answer()
 
@@ -75,19 +101,28 @@ async def cb_view_character(callback: CallbackQuery, session: AsyncSession):
     char_id = int(callback.data.split(":")[1])
     user = await get_user(session, callback.from_user.id)
     
-    stmt = (
-        select(UserCollection)
-        .where(UserCollection.user_id == user.id, UserCollection.character_id == char_id)
-        .options(selectinload(UserCollection.character))
-    )
-    res = await session.execute(stmt)
-    coll = res.scalars().first()
+    # First get the character
+    stmt_char = select(Character).where(Character.id == char_id)
+    res_char = await session.execute(stmt_char)
+    character = res_char.scalars().first()
     
-    if not coll:
-        await callback.answer("Персонаж не найден в вашей коллекции.", show_alert=True)
+    if not character:
+        await callback.answer("Персонаж не найден.", show_alert=True)
         return
     
-    character = coll.character
+    # Check if current user owns this character
+    is_owned = False
+    is_favorite = 0
+    if user:
+        stmt_coll = select(UserCollection).where(
+            UserCollection.user_id == user.id, UserCollection.character_id == char_id
+        )
+        res_coll = await session.execute(stmt_coll)
+        coll = res_coll.scalars().first()
+        if coll:
+            is_owned = True
+            is_favorite = coll.is_favorite
+
     await callback.answer("⏳ Загружаем арт...")
     
     image_url = character.best_image_url
@@ -103,8 +138,10 @@ async def cb_view_character(callback: CallbackQuery, session: AsyncSession):
         f"🖼 Постов: {character.post_count}\n"
         f"💪 Ранг: {rank}"
     )
+    if not is_owned:
+        caption += "\n\n<i>У вас нет этого персонажа.</i>"
     
-    markup = get_char_view_keyboard(character.id, coll.is_favorite)
+    markup = get_char_view_keyboard(character.id, bool(is_favorite), show_favorite_btn=is_owned)
     
     if image_url:
         try:
@@ -220,7 +257,7 @@ async def cb_search_prompt(callback: CallbackQuery, session: AsyncSession):
     )
     await callback.answer()
 
-@router.message(F.text & ~F.text.startswith("/") & ~F.text.in_({"🎲 Крутить", "🗂 Моя коллекция", "♻️ Конвертация"}))
+@router.message(F.text & ~F.text.startswith("/") & ~F.text.in_({"🎲 Крутить", "🗂 Моя коллекция", "♻️ Конвертация", "🏆 Топ", "🔍 Игрок"}))
 async def cmd_search_collection(message: Message, session: AsyncSession):
     user = await get_user(session, message.from_user.id)
     if not user:
@@ -253,5 +290,5 @@ async def cmd_search_collection(message: Message, session: AsyncSession):
     await message.answer(
         f"🔍 Результаты поиска по <b>\"{message.text}\"</b>:\n"
         f"Страница: <b>1/{total_pages}</b>",
-        reply_markup=get_collection_keyboard(results, page=0)
+        reply_markup=get_collection_keyboard(results, target_user_id=user.id, page=0, is_owner=True)
     )
