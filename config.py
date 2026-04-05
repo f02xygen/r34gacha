@@ -17,5 +17,6 @@ class Settings:
     proxy: str = os.environ.get("PROXY", "")
     danbooru_login: str = os.environ.get("DANBOORU_LOGIN", "")
     danbooru_api_key: str = os.environ.get("DANBOORU_API_KEY", "")
+    webapp_url: str = os.environ.get("WEBAPP_URL", "")
 
 settings = Settings()

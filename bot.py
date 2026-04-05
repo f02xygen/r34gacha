@@ -41,10 +41,35 @@ async def main():
     router.message.middleware(inject_session)
     router.callback_query.middleware(inject_session)
     
+    # Initialize aiohttp web app for Telegram Mini App backend
+    from aiohttp import web
+    from webapp_routes import routes as webapp_routes
+    import os
+    
+    webapp = web.Application()
+    webapp.add_routes(webapp_routes)
+    
+    # Serve static files for frontend WebApp
+    webapp_dir = os.path.join(os.path.dirname(__file__), "webapp")
+    os.makedirs(webapp_dir, exist_ok=True)
+    async def serve_index(request):
+        return web.FileResponse(os.path.join(webapp_dir, 'index.html'))
+
+    webapp.router.add_get('/', serve_index)
+    webapp.router.add_static("/", webapp_dir, append_version=True)
+    
+    runner = web.AppRunner(webapp)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8080)
+    
+    logging.info("Starting aiohttp WebApp server on 0.0.0.0:8080")
+    await site.start()
+    
     logging.info("Starting bot polling. Press Ctrl+C to stop.")
     try:
         await dp.start_polling(bot)
     finally:
+        await runner.cleanup()
         from parser import close_session
         await close_session()
         await bot.session.close()

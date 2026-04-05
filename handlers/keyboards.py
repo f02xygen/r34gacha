@@ -1,13 +1,15 @@
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
 from .utils import calculate_rank_short
+from config import settings
 
 def get_main_keyboard():
+    keyboard = [
+        [KeyboardButton(text="🎲 Крутить"), KeyboardButton(text="🗂 Моя коллекция")],
+        [KeyboardButton(text="🏆 Топ"), KeyboardButton(text="🔍 Игрок")],
+        [KeyboardButton(text="♻️ Конвертация")]
+    ]
     return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🎲 Крутить"), KeyboardButton(text="🗂 Моя коллекция")],
-            [KeyboardButton(text="🏆 Топ"), KeyboardButton(text="🔍 Игрок")],
-            [KeyboardButton(text="♻️ Конвертация")]
-        ],
+        keyboard=keyboard,
         resize_keyboard=True
     )
 
