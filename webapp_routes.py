@@ -13,12 +13,22 @@ from config import settings
 
 routes = web.RouteTableDef()
 
+import sys
 def _check_auth(request: web.Request) -> dict | None:
-    # Validate authorization via Telegram initData passed in Headers or JSON
-    init_data = request.headers.get("X-Tg-Init-Data")
+    # Use standard Authorization header if X-Tg-Init-Data is missing
+    init_data = request.headers.get("Authorization")
     if not init_data:
+        init_data = request.headers.get("X-Tg-Init-Data")
+        
+    if not init_data:
+        # Debugging: show what headers actually reached the server
+        sys.stderr.write(f"Auth check failed: InitData header is missing. Available headers: {list(request.headers.keys())}\n")
         return None
-    return validate_webapp_data(init_data, settings.bot_token)
+    
+    res = validate_webapp_data(init_data, settings.bot_token)
+    if not res:
+        sys.stderr.write(f"Auth check failed: HMAC mismatch. Token len: {len(settings.bot_token) if settings.bot_token else 0}\n")
+    return res
 
 import json
 def _get_tg_user(user_data: dict) -> dict | None:
