@@ -18,56 +18,61 @@
         <div class="error-msg" id="error-text"></div>
     </div>
 
-    <div class="arcade-room">
-        <div class="arcade-wrapper">
-            <!-- Main Slot Machine Box -->
-            <div class="slot-machine">
-                <!-- Top Marquee Display -->
-                <div class="top-marquee">
-                    <div id="char-name" class="character-name text-glitch" data-text="GACHA SLOTS">GACHA SLOTS</div>
-                </div>
+    <div id="app-container">
+        <!-- Top Bar -->
+        <div class="top-bar">
+            <div class="name-marquee-wrapper">
+                <div id="char-name" class="character-name text-glitch" data-text="GACHA SLOTS">GACHA SLOTS</div>
+            </div>
+        </div>
 
-                <!-- Main Display Area -->
-                <div class="display-container">
-                    <div class="glass-overlay"></div>
-                    <div class="drum-viewport">
-                        <div class="drum-strip" id="drum">
-                            <div class="drum-item placeholder" id="drum-item-current">WAITING</div>
-                        </div>
-                    </div>
+        <!-- Main Image Area -->
+        <div class="main-display">
+            <div class="glass-overlay"></div>
+            <div class="drum-viewport">
+                <div class="drum-strip" id="drum">
+                    <div class="drum-item placeholder text-glitch animating" id="drum-item-current" data-text="WAITING">WAITING</div>
                 </div>
+            </div>
+        </div>
 
-                <!-- LCD Screens -->
-                <div class="lcd-panel">
-                    <div class="lcd-screen">
-                        <div class="lcd-label">RANK</div>
-                        <div class="lcd-value text-glow" id="val-rank">-</div>
-                    </div>
-                    <div class="lcd-screen">
-                        <div class="lcd-label">TOTAL ARTS</div>
-                        <div class="lcd-value text-glow" id="val-arts">-</div>
-                    </div>
+        <!-- Interactive Horizontal Slider -->
+        <div class="slider-container">
+            <div class="slider-track">
+                <div class="slider-text">SWIPE TO ROLL &#x27A4;</div>
+            </div>
+            <div class="slider-handle" id="lever">
+                <div class="slider-grip">|||</div>
+            </div>
+        </div>
+
+        <!-- Bottom Dashboard Area -->
+        <div class="bottom-dashboard">
+            <!-- LCD Screens -->
+            <div class="lcd-panel">
+                <div class="lcd-screen">
+                    <div class="lcd-label">RANK</div>
+                    <div class="lcd-value text-glow" id="val-rank">-</div>
                 </div>
-
-                <!-- Bottom Controls Area -->
-                <div class="bottom-controls">
-                    <button id="btn-favorite" class="btn-heart inactive" disabled>
-                        <svg viewBox="0 0 24 24" class="heart-icon">
-                            <path
-                                d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" />
-                        </svg>
-                    </button>
-                    <div class="status-indicator">
-                        <div class="led-light" id="status-led"></div>
-                    </div>
+                <div class="lcd-screen">
+                    <div class="lcd-label">TOTAL ARTS</div>
+                    <div class="lcd-value text-glow" id="val-arts">-</div>
                 </div>
             </div>
 
-            <!-- Side Lever -->
-            <div class="lever-assembly">
-                <div class="lever-base"></div>
-                <div class="lever-stick" id="lever">
-                    <div class="lever-ball"></div>
+            <!-- Bottom Controls -->
+            <div class="bottom-controls">
+                <button id="btn-favorite" class="btn-heart inactive" disabled>
+                    <svg viewBox="0 0 24 24" class="heart-icon">
+                        <path
+                            d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z" />
+                    </svg>
+                </button>
+                <div class="status-container" id="status-container">
+                    <div class="status-numeric" id="val-status">RDY</div>
+                    <div class="status-indicator">
+                        <div class="led-light" id="status-led"></div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -78,7 +83,7 @@
         <div class="spinner"></div>
     </div>
 
-    <script src="script.js"></script>
+    <script src="script.js?v=11"></script>
 </body>
 
 </html>
